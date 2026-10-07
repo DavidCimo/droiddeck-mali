@@ -1,0 +1,104 @@
+diff --git a/src/virtio/vulkan/vn_physical_device.c b/src/virtio/vulkan/vn_physical_device.c
+index f3581aa..338ac95 100644
+--- a/src/virtio/vulkan/vn_physical_device.c
++++ b/src/virtio/vulkan/vn_physical_device.c
+@@ -1060,7 +1060,9 @@ vn_physical_device_init_external_fence_handles(
+ {
+    physical_dev->external_fence_handles = 0;
+ 
+-   if (physical_dev->instance->renderer->info.has_external_sync) {
++   /* Over vtest an export waits on the CPU and returns -1 (vn_sync.c). */
++   if (physical_dev->instance->renderer->info.has_external_sync ||
++       VN_DEBUG(VTEST)) {
+ #if !DETECT_OS_WINDOWS
+       physical_dev->external_fence_handles =
+          VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
+@@ -1095,7 +1097,8 @@ vn_physical_device_init_external_semaphore_handles(
+    physical_dev->external_binary_semaphore_handles = 0;
+    physical_dev->external_timeline_semaphore_handles = 0;
+ 
+-   if (physical_dev->instance->renderer->info.has_external_sync) {
++   if (physical_dev->instance->renderer->info.has_external_sync ||
++       VN_DEBUG(VTEST)) {
+ #if !DETECT_OS_WINDOWS
+       physical_dev->external_binary_semaphore_handles =
+          VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+@@ -1173,7 +1176,8 @@ vn_physical_device_get_native_extensions(
+    exts->KHR_map_memory2 = true;
+ #if !DETECT_OS_WINDOWS
+    exts->EXT_map_memory_placed = true;
+-   exts->EXT_physical_device_drm = true;
++   /* Over vtest there is no DRM device behind Venus. */
++   exts->EXT_physical_device_drm = !VN_DEBUG(VTEST);
+ #endif
+    /* use common implementation */
+    exts->EXT_tooling_info = true;
+diff --git a/src/virtio/vulkan/vn_sync.c b/src/virtio/vulkan/vn_sync.c
+index ee0a539..face729 100644
+--- a/src/virtio/vulkan/vn_sync.c
++++ b/src/virtio/vulkan/vn_sync.c
+@@ -49,6 +49,24 @@ vn_sync_payload_release(struct vn_device *dev,
+    vn_sync_payload_release_internal(dev, payload, NULL);
+ }
+ 
++/* vtest cannot export a sync_file: wait for the payload on the CPU and
++ * return -1, the sync fd that stands for an already signaled payload.
++ */
++static int
++vn_sync_export_signaled(struct vn_device *dev, struct vn_renderer_sync *sync)
++{
++   uint64_t val = 1;
++   const struct vn_renderer_wait wait = {
++      .timeout = UINT64_MAX,
++      .syncs = &sync,
++      .sync_values = &val,
++      .sync_count = 1,
++   };
++   vn_renderer_wait(dev->renderer, &wait);
++   vn_renderer_sync_reset(dev->renderer, sync);
++   return -1;
++}
++
+ /* fence commands */
+ 
+ static VkResult
+@@ -298,7 +316,10 @@ vn_GetFenceFdKHR(VkDevice device,
+    assert(sync_file);
+ 
+    int fd = -1;
+-   if (payload->type == VN_SYNC_TYPE_SYNC) {
++   if (payload->type == VN_SYNC_TYPE_SYNC &&
++       !dev->renderer->info.has_external_sync) {
++      fd = vn_sync_export_signaled(dev, payload->sync);
++   } else if (payload->type == VN_SYNC_TYPE_SYNC) {
+       fd = vn_renderer_sync_export_syncobj(dev->renderer,
+                                            fence->payload->sync, sync_file);
+       vn_renderer_sync_reset(dev->renderer, fence->payload->sync);
+@@ -830,7 +851,11 @@ vn_GetSemaphoreFdKHR(VkDevice device,
+    assert(sync_file);
+ 
+    int fd = -1;
+-   if (payload->type == VN_SYNC_TYPE_SYNC) {
++   if (payload->type == VN_SYNC_TYPE_SYNC &&
++       !dev->renderer->info.has_external_sync) {
++      assert(sem->sync_fd_export);
++      fd = vn_sync_export_signaled(dev, payload->sync);
++   } else if (payload->type == VN_SYNC_TYPE_SYNC) {
+       assert(sem->sync_fd_export);
+       fd = vn_renderer_sync_export_syncobj(dev->renderer, payload->sync,
+                                            sync_file);
+diff --git a/src/vulkan/wsi/wsi_common_drm.c b/src/vulkan/wsi/wsi_common_drm.c
+index dbf65b2..2a6b701 100644
+--- a/src/vulkan/wsi/wsi_common_drm.c
++++ b/src/vulkan/wsi/wsi_common_drm.c
+@@ -204,6 +204,10 @@ wsi_signal_dma_buf_from_semaphore(const struct wsi_swapchain *chain,
+    if (result != VK_SUCCESS)
+       return result;
+ 
++   /* -1 is an already signaled payload: there is nothing to attach. */
++   if (sync_file_fd < 0)
++      return VK_SUCCESS;
++
+    result = wsi_dma_buf_import_sync_file(image->dma_buf_fd, sync_file_fd);
+    close(sync_file_fd);
+    return result;

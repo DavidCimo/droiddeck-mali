@@ -461,6 +461,21 @@ static int dev_init(void) {
     g_vk.EnumerateDeviceExtensionProperties(g_pd, NULL, &ne, NULL);
     VkExtensionProperties *exts = calloc(ne ? ne : 1, sizeof(*exts));
     g_vk.EnumerateDeviceExtensionProperties(g_pd, NULL, &ne, exts);
+    /* The whole list, once: on a vendor driver it is what Venus can offer the session.
+     * Several lines, since a log line holds 512 bytes. */
+    {
+        char names[440];
+        size_t len = 0;
+        droiddeck_log("gpu", "device extensions: %u", ne);
+        for (uint32_t i = 0; i < ne; i++) {
+            if (len + strlen(exts[i].extensionName) + 2 > sizeof(names)) {
+                droiddeck_log("gpu", "  %s", names);
+                len = 0;
+            }
+            len += (size_t)snprintf(names + len, sizeof(names) - len, "%s%s", len ? " " : "", exts[i].extensionName);
+        }
+        if (len) droiddeck_log("gpu", "  %s", names);
+    }
     for (unsigned i = 0; i < 5; i++) {
         if (has_ext(exts, ne, wanted_exts[i]))
             dev_exts[n_dev_exts++] = wanted_exts[i];
