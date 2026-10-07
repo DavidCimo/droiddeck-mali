@@ -1,0 +1,49 @@
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+index e2c3baa..954207a 100644
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -207,25 +207,38 @@ vkr_physical_device_init_memory_properties(struct vkr_physical_device *physical_
+       .sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES,
+    };
+ 
++   /* Exportable and compatible with itself is enough. Requiring the type in
++    * exportFromImportedHandleTypes as well rules out drivers (Mali on Android)
++    * that export fine but do not re-export imported memory.
++    */
+    if (physical_dev->EXT_external_memory_dma_buf) {
+       info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+       vk->GetPhysicalDeviceExternalBufferProperties(handle, &info, &props);
++      const VkExternalMemoryProperties *p = &props.externalMemoryProperties;
++      vkr_log("dma_buf buffer: features 0x%x exportFrom 0x%x compatible 0x%x",
++              p->externalMemoryFeatures, p->exportFromImportedHandleTypes,
++              p->compatibleHandleTypes);
+       physical_dev->is_dma_buf_fd_export_supported =
+-         (props.externalMemoryProperties.externalMemoryFeatures &
+-          VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) &&
+-         (props.externalMemoryProperties.exportFromImportedHandleTypes &
++         (p->externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) &&
++         ((p->exportFromImportedHandleTypes | p->compatibleHandleTypes) &
+           VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
+    }
+ 
+    if (physical_dev->KHR_external_memory_fd) {
+       info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+       vk->GetPhysicalDeviceExternalBufferProperties(handle, &info, &props);
++      const VkExternalMemoryProperties *p = &props.externalMemoryProperties;
++      vkr_log("opaque_fd buffer: features 0x%x exportFrom 0x%x compatible 0x%x",
++              p->externalMemoryFeatures, p->exportFromImportedHandleTypes,
++              p->compatibleHandleTypes);
+       physical_dev->is_opaque_fd_export_supported =
+-         (props.externalMemoryProperties.externalMemoryFeatures &
+-          VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) &&
+-         (props.externalMemoryProperties.exportFromImportedHandleTypes &
++         (p->externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) &&
++         ((p->exportFromImportedHandleTypes | p->compatibleHandleTypes) &
+           VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT);
+    }
++   vkr_log("memory export: dma_buf %d opaque_fd %d",
++           physical_dev->is_dma_buf_fd_export_supported,
++           physical_dev->is_opaque_fd_export_supported);
+ 
+    /* fallback to gbm allocation with dma-buf import */
+    if (!physical_dev->is_dma_buf_fd_export_supported &&
