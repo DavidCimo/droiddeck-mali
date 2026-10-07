@@ -134,6 +134,7 @@ object DeviceReport {
             k("Linux driver", label)
         }
         k("Runtime's own ICD", LinuxRuntime.vulkanIcd(context)?.path)
+        k("Venus (vtest to the system driver)", com.droiddeck.launcher.session.VenusComponent.wanted(context))
 
         h("Runtime")
         k("Installed version", LinuxRuntimeInstaller.installedVersion(context))

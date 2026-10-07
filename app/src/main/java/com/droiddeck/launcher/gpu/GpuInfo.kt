@@ -48,7 +48,7 @@ data class GpuInfo(
             Support.TESTED -> "Supported"
             Support.UNTESTED -> if (family == Family.A7XX_LOW) "Experimental: its drivers are test builds"
                 else "Below tested hardware (Adreno 725 and newer): it may not run"
-            Support.UNSUPPORTED -> "Not supported: DroidDeck needs an Adreno (Snapdragon) GPU"
+            Support.UNSUPPORTED -> "Experimental: Venus over the system Vulkan driver (prototype)"
         }
 
     companion object {

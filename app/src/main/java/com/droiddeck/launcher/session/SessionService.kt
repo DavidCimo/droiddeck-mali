@@ -308,6 +308,9 @@ class SessionService : Service() {
         val fastPathAt = guest.size
 
         val pulse = startAudio(guest, sessionDir)
+        if (VenusComponent.wanted(this)) {
+            components.add(VenusComponent(File(sessionDir, "venus.log")).also { it.attach(this) })
+        }
 
         guest.add("BL_WIDTH=" + size.first)
         guest.add("BL_HEIGHT=" + size.second)
@@ -549,7 +552,11 @@ class SessionService : Service() {
         guest.add("MESA_LOADER_DRIVER_OVERRIDE=zink")
         guest.add("GALLIUM_DRIVER=zink")
         guest.add("LIBGL_KOPPER_DRI2=true")
-        LinuxRuntime.vulkanIcd(this)?.let { guest.add("VK_ICD_FILENAMES=" + it.path) }
+        if (VenusComponent.wanted(this)) {
+            VenusComponent.guestEnv(this).forEach { guest.add(it) }
+        } else {
+            LinuxRuntime.vulkanIcd(this)?.let { guest.add("VK_ICD_FILENAMES=" + it.path) }
+        }
         // An imported glibc Turnip, when one is set (by the user, or by Auto): the session script
         // checks the manifest and its library from inside and points the loader at it with
         // VK_DRIVER_FILES, so the runtime's own driver above stays untouched and is what a bad

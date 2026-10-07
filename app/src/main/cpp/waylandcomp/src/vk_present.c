@@ -450,18 +450,23 @@ static int dev_init(void) {
     }
     g_vk.GetPhysicalDeviceMemoryProperties(g_pd, &g_memprops);
 
-    /* Verify the dmabuf-import extensions are present, and log any that are missing. */
-    const char *dev_exts[7] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_external_memory_fd",
-                               "VK_EXT_external_memory_dma_buf", "VK_EXT_image_drm_format_modifier",
-                               "VK_KHR_image_format_list", NULL, NULL};
-    uint32_t n_dev_exts = 5;
+    /* The dmabuf-import extensions are enabled only when present: a vendor driver (Mali) may lack
+     * one, and naming it would fail vkCreateDevice and leave the session with no compositor. */
+    static const char *const wanted_exts[5] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_external_memory_fd",
+                                               "VK_EXT_external_memory_dma_buf", "VK_EXT_image_drm_format_modifier",
+                                               "VK_KHR_image_format_list"};
+    const char *dev_exts[7] = {0};
+    uint32_t n_dev_exts = 0;
     uint32_t ne = 0;
     g_vk.EnumerateDeviceExtensionProperties(g_pd, NULL, &ne, NULL);
     VkExtensionProperties *exts = calloc(ne ? ne : 1, sizeof(*exts));
     g_vk.EnumerateDeviceExtensionProperties(g_pd, NULL, &ne, exts);
-    for (unsigned i = 0; i < 5; i++)
-        if (!has_ext(exts, ne, dev_exts[i]))
-            LOGE("present: driver MISSING %s (dmabuf import will fail)", dev_exts[i]);
+    for (unsigned i = 0; i < 5; i++) {
+        if (has_ext(exts, ne, wanted_exts[i]))
+            dev_exts[n_dev_exts++] = wanted_exts[i];
+        else
+            LOGE("present: driver MISSING %s (dmabuf import will fail)", wanted_exts[i]);
+    }
     /* HDR sessions only: the HDR10 swapchain (frame generation) can carry the game's metadata. */
     int want_hdr_md = 0;
     if (droiddeck_color_requested()) {

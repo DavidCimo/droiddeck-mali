@@ -749,7 +749,7 @@ class MainActivity : ComponentActivity() {
                 showNonAdreno?.let { release ->
                     ConfirmDialog(
                         title = "Not an Adreno GPU",
-                        text = "Turnip supports Adreno GPUs. On ${com.droiddeck.launcher.core.DeviceSupport.gpuName()}, Steam may show a black screen. Download: ${"%.0f".format(release.size / 1e6)} MB.",
+                        text = "Turnip supports Adreno GPUs. On ${com.droiddeck.launcher.core.DeviceSupport.gpuName()} this build draws through Venus, an experimental bridge to the system Vulkan driver: expect it to be slow or not to start. Download: ${"%.0f".format(release.size / 1e6)} MB.",
                         confirm = "Install anyway",
                         onConfirm = { showNonAdreno = null; install(release) },
                         onDismiss = { showNonAdreno = null },

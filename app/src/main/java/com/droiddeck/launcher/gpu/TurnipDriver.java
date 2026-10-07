@@ -337,6 +337,11 @@ public final class TurnipDriver {
             if (forced.startsWith("a8")) return DRIVER_A8XX;
             if (forced.startsWith("a7")) return DRIVER_A7XX;
         }
+        // Turnip finds no physical device on Mali and the like; their own driver draws the screen.
+        if (!com.droiddeck.launcher.core.DeviceSupport.INSTANCE.adreno()) {
+            Log.i(TAG, "not an Adreno GPU: compositor uses the system Vulkan driver");
+            return null;
+        }
         String model = gpuModel();
         Log.i(TAG, "gpu model: " + (model == null ? "unknown" : model));
         if (model != null) {
