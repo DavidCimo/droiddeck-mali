@@ -6,15 +6,24 @@ This branch makes it run on the user's Pixel 9 Pro (Tensor G4, Mali-G715, Androi
 
 ## Status (2026-10-08)
 
-Steam Big Picture reaches its sign-in screen on the Pixel, at about 50 fps.
-The user has not signed in or started a game yet.
+Prototype 11 runs Steam Big Picture with a clean, live picture.
+The user signed in and played Slay the Spire 2 at about 40 fps.
 
 Open problems:
-- A few short horizontal dash artifacts across the picture.
-- Games are untested. Mali has no BCn texture compression, so many DXVK games will break.
+- Hollow Knight Silksong (Unity, D3D11 through DXVK) exits during startup. Logs: session `2026-10-08-14-steam`.
+  - DXVK creates its Vulkan instance, then the game exits before any swapchain.
+  - Proton turns DXVK logging off, so the reason is not in the session logs.
+  - Next: read Unity's `Player.log` in the prefix, under `AppData/LocalLow/Team Cherry/Hollow Knight Silksong/`.
+  - Suspects: no BCn and no geometry shaders on Mali, which D3D11 feature level 11 needs.
+- Steam's UI blocks 30 s at a time on `IClientFriends::GetVoiceMicrophoneVolume`.
+  - A game launch looks stuck on "Launching" for that long, even after the game has died.
+- Mali has no BCn texture compression, so many DXVK games will break.
 - The render server aborts ("pthread_mutex_lock called on a destroyed mutex") when a context dies after an error. Not fixed.
 - The phone runs short of memory: about 1 GB free and swap nearly full during a session.
-- Prototypes 7 to 9 are debuggable (`debuggable true` in `app/build.gradle`, uncommitted) so `adb run-as` works.
+- Performance is unmeasured beyond the on-screen fps.
+  - gamescope now uploads every Xwayland frame into a new texture (patch 0114).
+  - The shared memory is uncached, so CPU reads of it are slow.
+- Prototypes 7 to 11 are debuggable (`debuggable true` in `app/build.gradle`, uncommitted) so `adb run-as` works.
   - Android shows a harmless "not 16 KB-compatible" dialog because of it.
   - Remove before any real release.
 
@@ -23,11 +32,12 @@ Open problems:
 - **Source:** `C:\Users\derab\source\repos\DroidDeck`, branch `mali-venus` (off tag `0.3.1`).
 - **Remote:** `mine` = https://github.com/DavidCimo/droiddeck-mali. It's public; the user made it public to download on the phone.
   - The gh account is `DavidCimo`.
-  - Releases `mali-venus-proto1`…`proto6` hold the APKs. Proto 7 to 9 were installed over ADB only.
+  - Releases `mali-venus-proto1`…`proto6` hold the APKs. Proto 7 to 11 were installed over ADB only.
 - **Build outputs:** `C:\Users\derab\source\repos\droiddeck-mali\`
   - `DroidDeck-0.3.1.apk`: the official APK. Prebuilt assets and proot come from it.
   - `venus-out/`: the Mesa Venus ICD.
   - `libblsession.so`: the session preload with `venus.c`.
+  - `gamescope`: gamescope 3.16.29 with the app's patches plus 0114.
   - `venus.patch`: the source diff the APK build applies.
   - `DroidDeck-0.3.1-mali-venus-<n>.apk`: the builds.
 - **WSL Ubuntu** (`wsl -d Ubuntu`, user `delo`; use `-u root` for apt, there's no passwordless sudo):
@@ -75,11 +85,22 @@ App (Kotlin/C):
   - Buffers report dma_buf features 0x4 (importable only); opaque fd reports nothing.
   - virglrenderer's minigbm fallback does not exist on Android.
 - On Android the server allocates the dma-buf itself and imports it.
-  - Source: `/dev/dma_heap/system`, falling back to an `AHardwareBuffer` fd.
+  - Source: `/dev/dma_heap/system-uncached`, then `/dev/dma_heap/system`, then an `AHardwareBuffer` fd.
+  - Uncached because Mali here is not cache-coherent with the CPU, and nobody calls `DMA_BUF_IOCTL_SYNC`.
+  - The guest maps all host-visible memory as coherent, and vtest's flush and invalidate do nothing.
+  - On the cached heap, frames tore at cache-line granularity: the streaks.
   - The fd rides the existing udmabuf plumbing.
 - Image and buffer queries report "importable dma-buf" as exportable too. gamescope keeps only exportable modifiers.
 - Exports of any memory type go through that allocator.
 - Logs what the driver reports, and failed allocations.
+
+`tools/gamescope/patches/0114-shm-buffers-upload-every-commit.patch`:
+- Xwayland has no glamor here, so it reuses about three wl_shm buffers with new pixels.
+- gamescope cached one texture per buffer, copied at first import.
+- The screen cycled through three stale frames: the flicker. Input and audio still worked.
+- The patch caches dma-buf textures only, and uploads shm buffers on every commit.
+- See `tools/gamescope/PATCHES.md`.
+- The session stages gamescope from the APK assets every start, so it needs an APK rebuild.
 
 ## Build
 
@@ -90,28 +111,35 @@ Run each step after its inputs change:
    - After editing `/home/delo/mali/virglrenderer`, refresh the patch: `git -C /home/delo/mali/virglrenderer diff > .../tools/venus/virglrenderer-android.patch`.
 2. Guest ICD (Git Bash, Docker Desktop running): `MSYS_NO_PATHCONV=1 bash tools/venus/build-venus-icd.sh`
 3. Preload (Git Bash, Docker): `MSYS_NO_PATHCONV=1 bash tools/venus/build-libblsession.sh`
-4. Source patch (Git Bash): `git diff 0.3.1 > ../droiddeck-mali/venus.patch`
+4. gamescope (Git Bash, Docker): `MSYS_NO_PATHCONV=1 bash tools/venus/build-gamescope.sh`
+   - Emulated arm64, so it takes most of an hour.
+   - Prototype 11's binary came from the same steps run by hand; the script itself has not run yet.
+5. Source patch (Git Bash): `git diff 0.3.1 > ../droiddeck-mali/venus.patch`
    - Run `git add -N` on new files first.
-5. APK (WSL): `bash /mnt/c/Users/derab/source/repos/DroidDeck/tools/venus/build-apk.sh <n>`
+6. APK (WSL): `bash /mnt/c/Users/derab/source/repos/DroidDeck/tools/venus/build-apk.sh <n>`
 
 Gotchas:
 - Run Docker from Git Bash, not WSL: Docker Desktop's WSL integration is off.
 - Prefix Git Bash commands with `MSYS_NO_PATHCONV=1`, or paths given to `wsl`, `docker` and `adb` get mangled.
 - `adb pull` needs a Windows path as its target.
 - The APK is signed with the project's public test key, so it installs over earlier prototypes but not over the official app.
+- Use `git -c core.autocrlf=false -c core.eol=lf archive` to export files for a Linux build; plain `git archive` writes CRLF.
 
 ## Test loop over ADB
 
 ```sh
 A=/c/Users/derab/tools/platform-tools/adb.exe; export MSYS_NO_PATHCONV=1
 $A mdns services                     # find the phone's connect port if it dropped
-$A install -r "C:/Users/derab/source/repos/droiddeck-mali/DroidDeck-0.3.1-mali-venus-<n>.apk"
+timeout 300 $A install -r "C:/Users/derab/source/repos/droiddeck-mali/DroidDeck-0.3.1-mali-venus-<n>.apk"
 $A shell am force-stop com.droiddeck.launcher
 $A shell monkey -p com.droiddeck.launcher -c android.intent.category.LAUNCHER 1
 $A shell input tap 897 1064          # "Play Steam" on the main page
 $A exec-out screencap -p > shot.png
 ```
 
+- The phone must be awake and unlocked, or `adb install` hangs.
+- Tap "Play Steam" only once MainActivity is the top resumed activity; an earlier tap is lost.
+- Wrap a remote `run-as ... sh -c` command in double quotes as one argument, or adb splits it.
 - Session logs: `/sdcard/Download/DroidDeck/<newest>/`
   - `session.log`: gamescope and Steam stdout.
   - `venus.log`: the vtest and render servers.
@@ -135,14 +163,16 @@ $A exec-out screencap -p > shot.png
 7. Updater "zink: could not create swapchain"; Xwayland has no glamor, so no DRI3 → `MESA_VK_WSI_DEBUG=sw`.
 8. steamwebhelper restart loop, "failed to acquire a gl context" → `venus.c` preload unsets `LIBGL_KOPPER_DISABLE`.
 9. Frames reach the compositor but "0 windows open" and the overlay stays → compositor: fix stride 0 on gamescope's 1x1 root buffer.
-10. Sign-in screen shows (current).
+10. Sign-in screen shows, with dash streaks across it → virgl: allocate from the uncached dma-heap.
+11. Picture looks frozen or flickers between old frames, though clicks play sounds → gamescope patch 0114.
+12. Steam sign-in and Slay the Spire 2 at about 40 fps (current).
 
 ## Next steps
 
-- User signs in (QR code or account name). Never enter credentials for them.
-- Try a light game, then read Proton/DXVK output in `session.log` and `venus.log`.
+- Never enter credentials for the user. They type the password and handle Steam Guard themselves.
+- Try heavier games, then read Proton/DXVK output in `session.log` and `venus.log`.
 - Likely next blockers: BCn textures (DXVK needs them, Mali has none), geometry shaders, `gl_ClipDistance`.
   - Vortek (Winlator) handles these with emulation, which would need porting into virglrenderer or a Vulkan layer.
 - Fix the render server's destroyed-mutex abort on context teardown.
-- Look at the dash artifacts. Suspects: the sw WSI copy path, or cache coherency of the system-heap dma-buf.
+- Measure the cost of patch 0114 and the uncached heap, if fps matters.
 - Before sharing builds widely: drop `debuggable true` and publish a release.

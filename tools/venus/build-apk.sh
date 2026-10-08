@@ -32,6 +32,7 @@ cp -a $rel/assets/linuxfs $rel/assets/droiddeck-esync app/src/main/assets/
 cp $rel/assets/pulseaudio.tzst app/src/main/assets/pulseaudio.tzst
 cp $rel/lib/arm64-v8a/libproot.so $rel/lib/arm64-v8a/libproot-loader.so app/src/main/jniLibs/arm64-v8a/
 cp $MALI/libblsession.so app/src/main/assets/linuxfs/libblsession.so
+cp $MALI/gamescope app/src/main/assets/linuxfs/usr/local/bin/gamescope
 
 # Venus: the vtest server (bionic) as native libraries, the ICD (glibc) as an asset.
 A=/home/delo/mali/android-out

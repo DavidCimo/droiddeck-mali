@@ -1,8 +1,8 @@
 diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
-index ffe621b..0d43f0f 100644
+index ffe621b..973476d 100644
 --- a/src/venus/vkr_device_memory.c
 +++ b/src/venus/vkr_device_memory.c
-@@ -227,6 +227,121 @@ vkr_gbm_get_fd_info_from_allocation_info(UNUSED struct vkr_physical_device *phys
+@@ -227,6 +227,129 @@ vkr_gbm_get_fd_info_from_allocation_info(UNUSED struct vkr_physical_device *phys
  
  #endif /* ENABLE_GBM_ALLOCATION */
  
@@ -15,10 +15,18 @@ index ffe621b..0d43f0f 100644
 +
 +static int vkr_dma_heap_fd = -1;
 +
++/* Uncached first: nobody brackets CPU access with DMA_BUF_IOCTL_SYNC (the
++ * guest maps the memory as host-coherent), so on a cached heap the CPU and
++ * the GPU see each other's writes torn at cache-line granularity.
++ */
 +static void
 +vkr_dma_heap_init_once(void)
 +{
-+   vkr_dma_heap_fd = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
++   vkr_dma_heap_fd = open("/dev/dma_heap/system-uncached", O_RDONLY | O_CLOEXEC);
++   if (vkr_dma_heap_fd < 0) {
++      vkr_log("no uncached dma-buf heap (%s): using the cached one", strerror(errno));
++      vkr_dma_heap_fd = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
++   }
 +   if (vkr_dma_heap_fd < 0)
 +      vkr_log("no dma-buf heap (%s): allocating AHardwareBuffers", strerror(errno));
 +}
@@ -124,7 +132,7 @@ index ffe621b..0d43f0f 100644
  static void
  vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
                                struct vn_command_vkAllocateMemory *args)
-@@ -281,7 +396,14 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -281,7 +404,14 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
     int udmabuf_fd = -1;
     void *gbm_bo = NULL;
     VkExportMemoryAllocateInfo local_export_info;
@@ -140,7 +148,7 @@ index ffe621b..0d43f0f 100644
        /* An implementation can support dma_buf import along with opaque fd export/import.
         * If the client driver is using external memory and requesting dma_buf, without
         * dma_buf fd export support, we must use gbm bo import path instead of forcing
-@@ -346,6 +468,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -346,6 +476,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
               */
              args->ret = vkr_udmabuf_get_fd_info_from_allocation_info(
                 physical_dev, alloc_info, &udmabuf_fd, &local_import_info);
@@ -153,7 +161,7 @@ index ffe621b..0d43f0f 100644
           } else {
              args->ret = vkr_gbm_get_fd_info_from_allocation_info(
                 physical_dev, alloc_info, &gbm_bo, &local_import_info);
-@@ -367,6 +495,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -367,6 +503,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
  
     struct vkr_device_memory *mem = vkr_device_memory_create_and_add(ctx, args);
     if (!mem) {
