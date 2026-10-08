@@ -1,8 +1,8 @@
 diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
-index ffe621b..973476d 100644
+index ffe621b..01cd811 100644
 --- a/src/venus/vkr_device_memory.c
 +++ b/src/venus/vkr_device_memory.c
-@@ -227,6 +227,129 @@ vkr_gbm_get_fd_info_from_allocation_info(UNUSED struct vkr_physical_device *phys
+@@ -227,6 +227,136 @@ vkr_gbm_get_fd_info_from_allocation_info(UNUSED struct vkr_physical_device *phys
  
  #endif /* ENABLE_GBM_ALLOCATION */
  
@@ -14,18 +14,22 @@ index ffe621b..973476d 100644
 +#include <sys/socket.h>
 +
 +static int vkr_dma_heap_fd = -1;
++static int vkr_dma_heap_cached_fd = -1;
 +
-+/* Uncached first: nobody brackets CPU access with DMA_BUF_IOCTL_SYNC (the
-+ * guest maps the memory as host-coherent), so on a cached heap the CPU and
-+ * the GPU see each other's writes torn at cache-line granularity.
++/* Uncached for coherent memory types: nobody brackets CPU access with
++ * DMA_BUF_IOCTL_SYNC (the guest maps the memory as host-coherent), so on a
++ * cached heap the CPU and the GPU see each other's writes torn at cache-line
++ * granularity. Cached for cached types, which are not coherent: whoever maps
++ * them syncs the CPU cache through the dma-buf.
 + */
 +static void
 +vkr_dma_heap_init_once(void)
 +{
++   vkr_dma_heap_cached_fd = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
 +   vkr_dma_heap_fd = open("/dev/dma_heap/system-uncached", O_RDONLY | O_CLOEXEC);
 +   if (vkr_dma_heap_fd < 0) {
 +      vkr_log("no uncached dma-buf heap (%s): using the cached one", strerror(errno));
-+      vkr_dma_heap_fd = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
++      vkr_dma_heap_fd = vkr_dma_heap_cached_fd;
 +   }
 +   if (vkr_dma_heap_fd < 0)
 +      vkr_log("no dma-buf heap (%s): allocating AHardwareBuffers", strerror(errno));
@@ -89,6 +93,7 @@ index ffe621b..973476d 100644
 +
 +static VkResult
 +vkr_android_get_fd_info_from_allocation_info(const VkMemoryAllocateInfo *alloc_info,
++                                             bool cached,
 +                                             int *out_dma_buf_fd,
 +                                             VkImportMemoryFdInfoKHR *out_fd_info)
 +{
@@ -96,13 +101,15 @@ index ffe621b..973476d 100644
 +   call_once(&dma_heap_once_flag, vkr_dma_heap_init_once);
 +
 +   const size_t size = align(alloc_info->allocationSize, getpagesize());
++   const int heap_fd =
++      cached && vkr_dma_heap_cached_fd >= 0 ? vkr_dma_heap_cached_fd : vkr_dma_heap_fd;
 +   int dma_buf_fd = -1;
-+   if (vkr_dma_heap_fd >= 0) {
++   if (heap_fd >= 0) {
 +      struct dma_heap_allocation_data data = {
 +         .len = size,
 +         .fd_flags = O_RDWR | O_CLOEXEC,
 +      };
-+      if (!ioctl(vkr_dma_heap_fd, DMA_HEAP_IOCTL_ALLOC, &data))
++      if (!ioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &data))
 +         dma_buf_fd = data.fd;
 +      else
 +         vkr_log("dma-buf heap allocation of %zu failed (%s)", size, strerror(errno));
@@ -132,7 +139,7 @@ index ffe621b..973476d 100644
  static void
  vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
                                struct vn_command_vkAllocateMemory *args)
-@@ -281,7 +404,14 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -281,7 +411,14 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
     int udmabuf_fd = -1;
     void *gbm_bo = NULL;
     VkExportMemoryAllocateInfo local_export_info;
@@ -148,7 +155,7 @@ index ffe621b..973476d 100644
        /* An implementation can support dma_buf import along with opaque fd export/import.
         * If the client driver is using external memory and requesting dma_buf, without
         * dma_buf fd export support, we must use gbm bo import path instead of forcing
-@@ -346,6 +476,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -346,6 +483,13 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
               */
              args->ret = vkr_udmabuf_get_fd_info_from_allocation_info(
                 physical_dev, alloc_info, &udmabuf_fd, &local_import_info);
@@ -156,12 +163,13 @@ index ffe621b..973476d 100644
 +         } else if (physical_dev->android_dma_buf_import) {
 +            /* Kept in udmabuf_fd: exported and closed the same way. */
 +            args->ret = vkr_android_get_fd_info_from_allocation_info(
-+               alloc_info, &udmabuf_fd, &local_import_info);
++               alloc_info, property_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
++               &udmabuf_fd, &local_import_info);
 +#endif
           } else {
              args->ret = vkr_gbm_get_fd_info_from_allocation_info(
                 physical_dev, alloc_info, &gbm_bo, &local_import_info);
-@@ -367,6 +503,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -367,6 +511,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
  
     struct vkr_device_memory *mem = vkr_device_memory_create_and_add(ctx, args);
     if (!mem) {

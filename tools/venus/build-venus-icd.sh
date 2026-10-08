@@ -4,10 +4,19 @@
 # Run from Git Bash on Windows with Docker Desktop up (its WSL integration is off):
 #   MSYS_NO_PATHCONV=1 bash tools/venus/build-venus-icd.sh
 # Output: C:/Users/derab/source/repos/droiddeck-mali/venus-out/usr/lib/libvulkan_virtio.so
+# MEASURE=1 also applies measure-present.patch (per-frame present timings on stderr) and writes
+# venus-out-measure/ instead, for a hand-installed test build.
 set -euo pipefail
 OUT=C:/Users/derab/source/repos/droiddeck-mali
 VENUS=C:/Users/derab/source/repos/DroidDeck/tools/venus
-docker run --rm --platform linux/amd64 -v "$OUT":/w -v "$VENUS":/venus:ro -w /tmp debian:trixie bash -c '
+DEST=venus-out
+EXTRA_PATCH=
+if [ "${MEASURE:-}" = 1 ]; then
+  DEST=venus-out-measure
+  EXTRA_PATCH=/venus/measure-present.patch
+fi
+docker run --rm --platform linux/amd64 -v "$OUT":/w -v "$VENUS":/venus:ro -w /tmp \
+  -e DEST=$DEST -e EXTRA_PATCH=$EXTRA_PATCH debian:trixie bash -c '
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 dpkg --add-architecture arm64
@@ -38,7 +47,8 @@ endian = '"'"'little'"'"'
 EOF
 git clone -q --depth 1 -b mesa-26.2.4 https://gitlab.freedesktop.org/mesa/mesa.git 2>/dev/null
 (cd mesa && git apply /venus/mesa-venus-vtest.patch)
-rm -rf /w/venus-out
+if [ -n "$EXTRA_PATCH" ]; then (cd mesa && git apply "$EXTRA_PATCH"); fi
+rm -rf /w/$DEST
 meson setup venus-build mesa --cross-file /tmp/arm64.ini --prefix=/usr --libdir=lib \
   --buildtype=release -Db_ndebug=true \
   -Dvulkan-drivers=virtio -Dgallium-drivers= -Dplatforms=x11,wayland \
@@ -46,6 +56,6 @@ meson setup venus-build mesa --cross-file /tmp/arm64.ini --prefix=/usr --libdir=
   -Dvideo-codecs= -Dvulkan-layers= -Dtools= -Dbuild-tests=false -Dvalgrind=disabled -Dlibunwind=disabled \
   -Dzstd=enabled -Dshared-glapi=disabled
 ninja -C venus-build
-DESTDIR=/w/venus-out ninja -C venus-build install
-aarch64-linux-gnu-objdump -T /w/venus-out/usr/lib/libvulkan_virtio.so | grep -o "GLIBC_[0-9.]*" | sort -Vu | tail -1
+DESTDIR=/w/$DEST ninja -C venus-build install
+aarch64-linux-gnu-objdump -T /w/$DEST/usr/lib/libvulkan_virtio.so | grep -o "GLIBC_[0-9.]*" | sort -Vu | tail -1
 '

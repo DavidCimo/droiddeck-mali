@@ -4,20 +4,22 @@ Handoff notes for the next session.
 Upstream DroidDeck 0.3.1 runs on Adreno only.
 This branch makes it run on the user's Pixel 9 Pro (Tensor G4, Mali-G715, Android 17).
 
-## Status (2026-10-08, evening)
+## Status (2026-10-08, night)
 
-Prototype 12 is the APK on the phone, a release build (not debuggable).
+Prototype 13 is the APK on the phone, a release build (not debuggable).
+Prototypes 12 and 13 are published as GitHub prereleases.
 Steam Big Picture shows a clean, live picture, and Slay the Spire 2 runs at about 40 fps.
 
 Direct3D 9-11 games run through DXVK.
-Test game: Hollow Knight Silksong (Unity, D3D11), app id 1030300. In game at 30-40+ fps depending on the scene, stable, with good audio (2026-10-08).
-- Prototype 12 as installed: 35-40 fps. The phone was not throttling.
+Test game: Hollow Knight Silksong (Unity, D3D11), app id 1030300.
+- Prototype 12: 35-40 fps in game, stable, with good audio. The phone was not throttling.
+- Prototype 13 (cached frame readback, see Performance): 45-52 fps, averaging 47-52.
 
 Done and verified on the phone:
 - The Mali compatibility layer (`tools/venus/layer`) loads and reports the six features DXVK requires.
 - DXVK accepts the GPU and creates its device. D3D11 runs at feature level 11_0.
 - Silksong loads and plays.
-- Prototype 12 carries the layer and the queue-lock Venus ICD; nothing on the phone is installed by hand any more.
+- The APK carries the layer and the Venus ICD; nothing on the phone is installed by hand any more.
 
 Fixed: a crash in the Venus guest driver, about 20 s after launch, with a black screen until then.
 - Where: `vtest_vcmd_submit_cmd2` (`src/virtio/vulkan/vn_renderer_vtest.c`), on the `dxvk-submit` thread inside `vkQueueSubmit2`.
@@ -34,12 +36,45 @@ Other open problems:
 - Steam's UI blocks 30 s at a time on `IClientFriends::GetVoiceMicrophoneVolume`. A launch looks stuck on "Launching" even after the game died.
 - The render server aborts ("pthread_mutex_lock called on a destroyed mutex") when a context dies after an error. Not fixed.
 - The phone runs short of memory: about 1-2 GB free during a session. BC decoding makes textures 4-8x bigger.
-- Performance is unmeasured beyond the on-screen fps.
-  - gamescope uploads every Xwayland frame into a new texture (patch 0114).
-  - The shared memory is uncached, so CPU reads of it are slow.
-- Prototype 12 is not debuggable, so `adb run-as` fails and the hand-install loop below does not work.
+- Prototype 13 is not debuggable, so `adb run-as` fails and the hand-install loop below does not work.
   - To debug again: add `debuggable true` to the `release` build type in `app/build.gradle`, rebuild, reinstall. Keep it out of commits.
   - A debuggable build shows a harmless "not 16 KB-compatible" dialog.
+
+## Performance
+
+How a game frame reaches the screen (Silksong, 1280x720):
+1. The game draws through Venus. gamescope's WSI layer turns its X11 window into a Wayland surface on gamescope.
+2. Venus's present thread (`vn_wsi[0,0]`) runs WSI's software path (`MESA_VK_WSI_DEBUG=sw`).
+   - It blits the image into a host-visible buffer, waits for the GPU, and `memcpy`s the buffer into a `wl_shm` buffer (3.6 MB).
+3. gamescope uploads that `wl_shm` buffer into a texture (patch 0114), composites, and hands a dma-buf to the app.
+4. The app's compositor draws it at 60 Hz. Its own work is about 2-3 ms a frame (`wayland.log`, `perf` lines).
+
+Measured with `tools/venus/measure-present.patch` (see "Measuring a frame" below):
+
+| Per frame | Prototype 12 | Prototype 13 |
+|---|---|---|
+| Frame interval | 26-29 ms | ~20 ms |
+| `memcpy` out of the readback buffer | 7-10 ms (~400 MB/s) | ~1.3 ms, cache sync included |
+| Present thread total | 17-20 ms | ~12 ms |
+| GPU fence waits (two per present) | ~4 ms | ~4.5 ms |
+| Game blocked in `vn_wsi_flush` | ~0.4 ms | ~0.01 ms |
+
+Why the copy was slow: Venus hid Mali's cached memory type.
+- Mali's native types (`memtypes` probe): 0 = device-local, host-visible, coherent (uncached); 1 = device-local, host-visible, cached (not coherent).
+- `vn_physical_device_init_memory_properties` strips host-visible from cached types that are not coherent, and labels type 0 "cached" for app compatibility.
+- So WSI's readback buffer landed on uncached memory, and the CPU read it at ~400 MB/s.
+
+The fix (prototype 13):
+- Venus allocates WSI's readback buffer in the hidden cached type (`vn_wsi_memory_type_index`). Apps still never see that type.
+- The vtest renderer keeps that buffer's dma-buf fd and implements flush and invalidate as `DMA_BUF_IOCTL_SYNC`.
+- WSI calls `vkInvalidateMappedMemoryRanges` before every CPU read of a frame (Wayland and X11 software paths).
+- The render server allocates cached memory types from the cached dma-buf heap (`/dev/dma_heap/system`).
+
+What is left on the present thread (~12 ms):
+- ~4.5 ms in two GPU fence waits. WSI makes a second, empty submit for DXVK's present fence, and Venus waits on each.
+- ~6 ms in those two submits and their Venus round trips.
+- Thread sample (`top -H`, prototype 12): no thread at 100%. Game main thread 48%, `vn_wsi` 30%, `dxvk-frame` 30%, Unity render thread 25%.
+  - `dxvk-frame` mostly waits for presents; 30% CPU looks like Venus polling in its semaphore waits.
 
 ## State outside the repo and the APK
 
@@ -48,14 +83,14 @@ On the phone, changed by hand (read this before testing anything):
   - Delete it when debugging is done: `adb shell rm /sdcard/Download/droiddeck-env`.
 - `/data/local/tmp` holds copies of the pushed files and `watch-maps.sh`.
 
-Published: prototype 12 as the prerelease `mali-venus-proto12`. Prototypes 7 to 11 were never published.
+Published: prototypes 12 and 13 as the prereleases `mali-venus-proto12` and `mali-venus-proto13`. Prototypes 7 to 11 were never published.
 
 ## Where things are
 
 - **Source:** `C:\Users\derab\source\repos\DroidDeck`, branch `mali-venus` (off tag `0.3.1`).
 - **Remote:** `mine` = https://github.com/DavidCimo/droiddeck-mali. It's public; the user made it public to download on the phone.
   - The gh account is `DavidCimo`.
-  - Releases `mali-venus-proto1`…`proto6` and `proto12` hold the APKs. Proto 7 to 11 were installed over ADB only.
+  - Releases `mali-venus-proto1`…`proto6`, `proto12` and `proto13` hold the APKs. Proto 7 to 11 were installed over ADB only.
   - Publish with `gh release create mali-venus-proto<n> -R DavidCimo/droiddeck-mali --prerelease --target mali-venus --title "0.3.1 + Venus prototype <n>" --notes-file … <apk>`, after pushing the branch.
 - **Build outputs:** `C:\Users\derab\source\repos\droiddeck-mali\`
   - `DroidDeck-0.3.1.apk`: the official APK. Prebuilt assets and proot come from it.
@@ -159,16 +194,22 @@ App (Kotlin/C):
 - `vn_queue_submission_init_syncs` submits only the sync slots it filled.
 - Timeline semaphores free all `queue_count + 1` renderer syncs. Upstream freed one too few and leaked a vtest sync each.
 - `vn_queue_submit` runs under a per-queue `submit_mutex`. The async present thread raced the app's submits; see Status.
+- WSI's CPU readback buffer goes to Mali's hidden cached memory type; see Performance.
+  - `vn_physical_device`: keeps the renderer's real memory flags, and picks the hidden type under vtest.
+  - `vn_renderer_vtest.c`: flush and invalidate of incoherent memory are `DMA_BUF_IOCTL_SYNC` on the bo's dma-buf.
+  - WSI common code: `vkInvalidateMappedMemoryRanges` before every CPU read of a frame.
+
+`tools/venus/measure-present.patch`: per-frame present timings on stderr, applied on top for `MEASURE=1` builds only.
 
 `tools/venus/virglrenderer-android.patch` (virglrenderer 1.3.0, host side):
 - Mali on Android can import dma-bufs but cannot export any memory.
   - Buffers report dma_buf features 0x4 (importable only); opaque fd reports nothing.
   - virglrenderer's minigbm fallback does not exist on Android.
 - On Android the server allocates the dma-buf itself and imports it.
-  - Source: `/dev/dma_heap/system-uncached`, then `/dev/dma_heap/system`, then an `AHardwareBuffer` fd.
-  - Uncached because Mali here is not cache-coherent with the CPU, and nobody calls `DMA_BUF_IOCTL_SYNC`.
-  - The guest maps all host-visible memory as coherent, and vtest's flush and invalidate do nothing.
-  - On the cached heap, frames tore at cache-line granularity: the streaks.
+  - Source for coherent types: `/dev/dma_heap/system-uncached`, then `/dev/dma_heap/system`, then an `AHardwareBuffer` fd.
+  - Uncached because Mali here is not cache-coherent with the CPU, and nobody calls `DMA_BUF_IOCTL_SYNC` on coherent memory.
+  - The guest maps coherent memory without syncs, and on the cached heap frames tore at cache-line granularity: the streaks.
+  - Cached types (not coherent) come from `/dev/dma_heap/system`. Whoever maps them syncs through the dma-buf.
   - The fd rides the existing udmabuf plumbing.
 - Image and buffer queries report "importable dma-buf" as exportable too. gamescope keeps only exportable modifiers.
 - Exports of any memory type go through that allocator.
@@ -257,6 +298,15 @@ Debugging a game:
   - The thread name is in the log: `Thread renamed to "dxvk-submit"`.
 - Untested idea for launching a game without the user: write `steam://rungameid/<appid>` into `files/linuxfs/root/.steam/steam.pipe`.
 
+Measuring a frame (needs a debuggable build):
+1. `MEASURE=1 MSYS_NO_PATHCONV=1 bash tools/venus/build-venus-icd.sh` builds the ICD with `measure-present.patch` into `droiddeck-mali/venus-out-measure/`.
+2. Install it by hand (see "Faster iteration"), with `PROTON_LOG=1` in `droiddeck-env`.
+3. Every 120 presents the game's Proton log gets two lines:
+   - `MEASURE wl`: frame interval, the `memcpy` out of the readback buffer, the whole Wayland present. Average/max in ms.
+   - `MEASURE vn`: the present thread, its GPU fence waits, and how long the game blocked in `vn_wsi_flush`.
+4. Per-thread CPU while playing: `adb shell "top -H -b -n 2 -d 8 -o TID,PID,%CPU,S,CMD,NAME"`, sorted by the third column.
+5. `wayland.log` in the session folder has the compositor's fps and per-frame costs every 10 s, without any special build.
+
 ## Failure history (prototype → cause → fix)
 
 1. Official APK installed → Turnip ICD, no GPU → install the prototype.
@@ -271,14 +321,18 @@ Debugging a game:
 10. Sign-in screen shows, with dash streaks across it → virgl: allocate from the uncached dma-heap.
 11. Picture looks frozen or flickers between old frames, though clicks play sounds → gamescope patch 0114.
 12. Steam sign-in and Slay the Spire 2 at about 40 fps. Silksong: "d3d11: failed to create factory"; DXVK skips the GPU for `fillModeNonSolid` → the Mali compatibility layer.
-13. Silksong: D3D11 starts, black screen, then a crash in Venus's `vtest_vcmd_submit_cmd2` → Mesa: serialize queue submits against the async present thread. Silksong plays at 40+ fps.
+13. Silksong: D3D11 starts, black screen, then a crash in Venus's `vtest_vcmd_submit_cmd2` → Mesa: serialize queue submits against the async present thread. Silksong plays at 35-40 fps.
+14. Silksong held at 35-40 fps; Venus's present thread spent half its time copying frames from uncached memory → cached readback buffer (prototype 13), 47-52 fps.
 
 ## Next steps
 
-1. Silksong: check BC textures look right and loading time is bearable.
-2. Test more DXVK games on different engines (Unreal, older D3D9). Fix shared gaps in the layer, never per game.
-3. Direct3D 12 games use VKD3D-Proton, which has its own requirement list. Check it the same way.
-4. Clean up: delete `droiddeck-env` when debugging is done.
+1. Performance, measured first with `MEASURE=1` (see Performance):
+   - The two GPU fence waits and two submits per present (~10 ms on the present thread).
+   - The `dxvk-frame` thread at 30% CPU, probably Venus polling in semaphore waits.
+2. Silksong: check BC textures look right and loading time is bearable.
+3. Test more games on different engines: GameMaker, FNA (Celeste, Stardew Valley), Unity D3D9, Godot. Fix shared gaps in the layer, never per game.
+4. Direct3D 12 games use VKD3D-Proton, which has its own requirement list. Check it the same way.
+5. Clean up: delete `droiddeck-env` when debugging is done.
 
 Rules from the user:
 - Never enter credentials for the user. They type the password and handle Steam Guard themselves.
