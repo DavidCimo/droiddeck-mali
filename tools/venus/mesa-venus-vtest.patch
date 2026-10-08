@@ -1,3 +1,23 @@
+diff --git a/src/virtio/vulkan/vn_device.c b/src/virtio/vulkan/vn_device.c
+index f42b9f9..6ed3051 100644
+--- a/src/virtio/vulkan/vn_device.c
++++ b/src/virtio/vulkan/vn_device.c
+@@ -45,6 +45,7 @@ vn_queue_fini(struct vn_queue *queue)
+    if (queue->wait_fence != VK_NULL_HANDLE) {
+       vn_DestroyFence(dev_handle, queue->wait_fence, NULL);
+    }
++   simple_mtx_destroy(&queue->submit_mutex);
+    vn_cached_storage_fini(&queue->storage);
+    vn_queue_base_fini(&queue->base);
+ }
+@@ -65,6 +66,7 @@ vn_queue_init(struct vn_device *dev,
+    queue->index = array_index;
+ 
+    vn_cached_storage_init(&queue->storage, &dev->base.vk.alloc);
++   simple_mtx_init(&queue->submit_mutex, mtx_plain);
+ 
+    if (dev->physical_device->emulate_second_queue ==
+           queue_info->queueFamilyIndex &&
 diff --git a/src/virtio/vulkan/vn_physical_device.c b/src/virtio/vulkan/vn_physical_device.c
 index f3581aa..338ac95 100644
 --- a/src/virtio/vulkan/vn_physical_device.c
@@ -33,11 +53,82 @@ index f3581aa..338ac95 100644
  #endif
     /* use common implementation */
     exts->EXT_tooling_info = true;
+diff --git a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
+index 057842a..dee1244 100644
+--- a/src/virtio/vulkan/vn_queue.c
++++ b/src/virtio/vulkan/vn_queue.c
+@@ -1049,11 +1049,16 @@ vn_queue_submission_init_syncs(struct vn_queue_submission *submit)
+       assert(fence->payload->type == VN_SYNC_TYPE_SYNC);
+ 
+       submit->temp.syncs[sync_index] = fence->payload->sync;
+-      submit->temp.sync_vals[sync_index] = 1;
++      submit->temp.sync_vals[sync_index++] = 1;
+ 
+       /* fence is backed by renderer sync without renderer object */
+       submit->fence_handle = VK_NULL_HANDLE;
+    }
++
++   /* A signal semaphore counted for an imported sync_file has no renderer
++    * sync to fill in, and the slot would hand vtest stale storage.
++    */
++   submit->sync_count = sync_index;
+ }
+ 
+ static VkResult
+@@ -1248,9 +1253,13 @@ vn_queue_submit(struct vn_queue_submission *submit)
+    struct vn_device *dev = vn_device_from_vk(queue->base.vk.base.device);
+    VkResult result;
+ 
++   simple_mtx_lock(&queue->submit_mutex);
++
+    result = vn_queue_submission_prepare_submit(submit);
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      simple_mtx_unlock(&queue->submit_mutex);
+       return vn_error(dev->instance, result);
++   }
+ 
+    result = vn_queue_submission_do_submit(submit);
+    if (result != VK_SUCCESS)
+@@ -1260,6 +1269,7 @@ vn_queue_submit(struct vn_queue_submission *submit)
+ 
+ out_cleanup:
+    vn_queue_submission_cleanup(submit);
++   simple_mtx_unlock(&queue->submit_mutex);
+    return vn_result(dev->instance, result);
+ }
+ 
+diff --git a/src/virtio/vulkan/vn_queue.h b/src/virtio/vulkan/vn_queue.h
+index 3ea6d9d..4160e56 100644
+--- a/src/virtio/vulkan/vn_queue.h
++++ b/src/virtio/vulkan/vn_queue.h
+@@ -52,6 +52,11 @@ struct vn_queue {
+    /* for vn_queue_submission storage */
+    struct vn_cached_storage storage;
+ 
++   /* Serializes submissions. The async present thread submits to this queue
++    * while the application does, after vn_wsi_fence_wait drops queue_mutex.
++    */
++   simple_mtx_t submit_mutex;
++
+    /* for async queue present */
+    struct {
+       /* Protects VkQueue host access except async present states. */
 diff --git a/src/virtio/vulkan/vn_sync.c b/src/virtio/vulkan/vn_sync.c
-index ee0a539..face729 100644
+index ee0a539..4687520 100644
 --- a/src/virtio/vulkan/vn_sync.c
 +++ b/src/virtio/vulkan/vn_sync.c
-@@ -49,6 +49,24 @@ vn_sync_payload_release(struct vn_device *dev,
+@@ -26,7 +26,8 @@ vn_sync_payload_release_internal(struct vn_device *dev,
+       vn_renderer_sync_destroy(dev->renderer, payload->sync);
+       break;
+    case VN_SYNC_TYPE_TIMELINE_SYNC:
+-      for (uint32_t i = 0; i < dev->queue_count; i++)
++      /* One sync per queue plus one for host signals. */
++      for (uint32_t i = 0; i <= dev->queue_count; i++)
+          vn_renderer_sync_destroy(dev->renderer, payload->syncs[i]);
+       vk_free2(&dev->base.vk.alloc, alloc, payload->syncs);
+       break;
+@@ -49,6 +50,24 @@ vn_sync_payload_release(struct vn_device *dev,
     vn_sync_payload_release_internal(dev, payload, NULL);
  }
  
@@ -62,7 +153,7 @@ index ee0a539..face729 100644
  /* fence commands */
  
  static VkResult
-@@ -298,7 +316,10 @@ vn_GetFenceFdKHR(VkDevice device,
+@@ -298,7 +317,10 @@ vn_GetFenceFdKHR(VkDevice device,
     assert(sync_file);
  
     int fd = -1;
@@ -74,7 +165,7 @@ index ee0a539..face729 100644
        fd = vn_renderer_sync_export_syncobj(dev->renderer,
                                             fence->payload->sync, sync_file);
        vn_renderer_sync_reset(dev->renderer, fence->payload->sync);
-@@ -830,7 +851,11 @@ vn_GetSemaphoreFdKHR(VkDevice device,
+@@ -830,7 +852,11 @@ vn_GetSemaphoreFdKHR(VkDevice device,
     assert(sync_file);
  
     int fd = -1;
