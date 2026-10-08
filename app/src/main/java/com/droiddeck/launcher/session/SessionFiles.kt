@@ -110,11 +110,18 @@ object SessionFiles {
         val fexPreloads = listOf("x86_64", "i386").flatMap { arch ->
             listOf("libblsession.so", "libfakeinput.so").map { "$arch/$it" to "usr/local/lib/droiddeck-fex/$arch/$it" }
         } + listOf("libfaultreport.so", "libthunkaudit.so", "libvulkan-thunk.so").map { "x86_64/$it" to "usr/local/lib/droiddeck-fex/x86_64/$it" }
+        // The Mali compatibility layer (tools/venus/layer): an implicit Vulkan layer that fills in
+        // the features DXVK requires and Mali lacks. It stays idle outside Wine and on GPUs that
+        // have them.
+        val maliCompat = listOf(
+            "usr/local/lib/droiddeck-mali/libVkLayer_droiddeck_mali_compat.so",
+            "usr/local/share/vulkan/implicit_layer.d/VkLayer_droiddeck_mali_compat.json",
+        ).map { it to it }
         val optional = (arrayOf(
             "usr/local/bin/gamescope" to "usr/local/bin/gamescope",
             "usr/local/lib/droiddeck/uruntime" to "usr/local/lib/droiddeck/uruntime",
             "usr/local/share/licenses/uruntime/LICENSE" to "usr/local/share/licenses/uruntime/LICENSE",
-        ) + wlroots + mangoapp + fexPreloads).filter { (asset, _) ->
+        ) + wlroots + mangoapp + fexPreloads + maliCompat).filter { (asset, _) ->
             val dir = asset.substringBeforeLast('/')
             runCatching { context.assets.list("linuxfs/$dir")?.contains(asset.substringAfterLast('/')) == true }.getOrDefault(false)
         }

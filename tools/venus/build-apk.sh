@@ -42,6 +42,12 @@ cp $A/lib/libvirglrenderer.so $A/lib/libepoxy.so app/src/main/jniLibs/arm64-v8a/
 mkdir -p app/src/main/assets/venus
 cp $MALI/venus-out/usr/lib/libvulkan_virtio.so app/src/main/assets/venus/
 
+# The Mali compatibility layer (build-layer.sh), staged into the runtime by SessionFiles.
+L=app/src/main/assets/linuxfs/usr/local
+mkdir -p $L/lib/droiddeck-mali $L/share/vulkan/implicit_layer.d
+cp $MALI/layer/libVkLayer_droiddeck_mali_compat.so $L/lib/droiddeck-mali/
+cp $MALI/layer/VkLayer_droiddeck_mali_compat.json $L/share/vulkan/implicit_layer.d/
+
 export ANDROID_HOME=$SDK ANDROID_SDK_ROOT=$SDK JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 echo "sdk.dir=$SDK" > local.properties
 chmod +x gradlew
