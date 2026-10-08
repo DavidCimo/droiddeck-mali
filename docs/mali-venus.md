@@ -48,16 +48,15 @@ On the phone, changed by hand (read this before testing anything):
   - Delete it when debugging is done: `adb shell rm /sdcard/Download/droiddeck-env`.
 - `/data/local/tmp` holds copies of the pushed files and `watch-maps.sh`.
 
-Not published: prototypes 7 to 12 as GitHub releases. Prototype 12's would be:
-`gh release create mali-venus-proto12 -R DavidCimo/droiddeck-mali --prerelease --target mali-venus --title "0.3.1 + Venus prototype 12" --notes "…" "C:/Users/derab/source/repos/droiddeck-mali/DroidDeck-0.3.1-mali-venus-12.apk"`
-It needs the branch pushed to `mine` first.
+Published: prototype 12 as the prerelease `mali-venus-proto12`. Prototypes 7 to 11 were never published.
 
 ## Where things are
 
 - **Source:** `C:\Users\derab\source\repos\DroidDeck`, branch `mali-venus` (off tag `0.3.1`).
 - **Remote:** `mine` = https://github.com/DavidCimo/droiddeck-mali. It's public; the user made it public to download on the phone.
   - The gh account is `DavidCimo`.
-  - Releases `mali-venus-proto1`…`proto6` hold the APKs. Proto 7 to 12 were installed over ADB only.
+  - Releases `mali-venus-proto1`…`proto6` and `proto12` hold the APKs. Proto 7 to 11 were installed over ADB only.
+  - Publish with `gh release create mali-venus-proto<n> -R DavidCimo/droiddeck-mali --prerelease --target mali-venus --title "0.3.1 + Venus prototype <n>" --notes-file … <apk>`, after pushing the branch.
 - **Build outputs:** `C:\Users\derab\source\repos\droiddeck-mali\`
   - `DroidDeck-0.3.1.apk`: the official APK. Prebuilt assets and proot come from it.
   - `venus-out/`: the Mesa Venus ICD.
