@@ -971,6 +971,10 @@ struct vkp_image *vkp_image_import_dmabuf(int fd, uint32_t drm_format, uint64_t 
     img->sampled = !as_blit_dst && g_vk.GetPhysicalDeviceImageFormatProperties2 &&
                    modifier_importable(img->fmt, modifier, sampled_usage);
 
+    /* Venus reports a row pitch of 0 for gamescope's 1x1 root buffer, and a zero pitch fails
+     * vkCreateImage, which left the whole window unshown. One packed, 64-byte aligned row is what
+     * a linear buffer that small holds. */
+    if (stride == 0 && modifier == 0) stride = ((uint32_t)w * 4 + 63) & ~63u;
     VkSubresourceLayout plane = {.offset = offset, .rowPitch = stride};
     VkImageDrmFormatModifierExplicitCreateInfoEXT modInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,

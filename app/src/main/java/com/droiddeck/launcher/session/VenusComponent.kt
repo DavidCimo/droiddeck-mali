@@ -73,6 +73,8 @@ class VenusComponent(private val logFile: File?) : SessionPart() {
                 "VK_ICD_FILENAMES=" + File(dir, ICD).path,
                 "VN_DEBUG=vtest",
                 "VTEST_SOCKET_NAME=" + socket(context).path,
+                // Xwayland has no DRI3 without a DRM node, so swapchains present through shared memory.
+                "MESA_VK_WSI_DEBUG=sw",
             )
         }
 
