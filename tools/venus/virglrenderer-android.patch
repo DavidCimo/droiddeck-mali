@@ -1,5 +1,5 @@
 diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
-index ffe621b..bbf7787 100644
+index ffe621b..0d43f0f 100644
 --- a/src/venus/vkr_device_memory.c
 +++ b/src/venus/vkr_device_memory.c
 @@ -227,6 +227,121 @@ vkr_gbm_get_fd_info_from_allocation_info(UNUSED struct vkr_physical_device *phys
@@ -124,7 +124,23 @@ index ffe621b..bbf7787 100644
  static void
  vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
                                struct vn_command_vkAllocateMemory *args)
-@@ -346,6 +461,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -281,7 +396,14 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+    int udmabuf_fd = -1;
+    void *gbm_bo = NULL;
+    VkExportMemoryAllocateInfo local_export_info;
+-   if ((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !res_info) {
++   /* Android without driver export: a dma-buf export of any memory type is
++    * served by a dma-buf the server allocates and imports.
++    */
++   const bool android_export =
++      physical_dev->android_dma_buf_import && export_info &&
++      (export_info->handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
++   if (((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) || android_export) &&
++       !res_info) {
+       /* An implementation can support dma_buf import along with opaque fd export/import.
+        * If the client driver is using external memory and requesting dma_buf, without
+        * dma_buf fd export support, we must use gbm bo import path instead of forcing
+@@ -346,6 +468,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
               */
              args->ret = vkr_udmabuf_get_fd_info_from_allocation_info(
                 physical_dev, alloc_info, &udmabuf_fd, &local_import_info);
@@ -137,7 +153,7 @@ index ffe621b..bbf7787 100644
           } else {
              args->ret = vkr_gbm_get_fd_info_from_allocation_info(
                 physical_dev, alloc_info, &gbm_bo, &local_import_info);
-@@ -367,6 +488,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -367,6 +495,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
  
     struct vkr_device_memory *mem = vkr_device_memory_create_and_add(ctx, args);
     if (!mem) {
@@ -151,7 +167,7 @@ index ffe621b..bbf7787 100644
           close(local_import_info.fd);
        if (gbm_bo)
 diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
-index e2c3baa..5b93333 100644
+index e2c3baa..69ec875 100644
 --- a/src/venus/vkr_physical_device.c
 +++ b/src/venus/vkr_physical_device.c
 @@ -207,31 +207,54 @@ vkr_physical_device_init_memory_properties(struct vkr_physical_device *physical_
@@ -215,6 +231,64 @@ index e2c3baa..5b93333 100644
  
     physical_dev->udmabuf_dev_fd = -1;
     if (VKR_DEBUG(UDMABUF)) {
+@@ -703,6 +726,25 @@ vkr_dispatch_vkGetPhysicalDeviceFormatProperties2(
+                                           args->pFormatProperties);
+ }
+ 
++/* Android without driver export: the server allocates a dma-buf and imports
++ * it (vkr_device_memory.c), so a dma-buf the driver can import, the guest
++ * can export.
++ */
++static void
++vkr_android_dma_buf_export_fixup(const struct vkr_physical_device *physical_dev,
++                                 VkExternalMemoryHandleTypeFlagBits handle_type,
++                                 VkExternalMemoryProperties *props)
++{
++   if (!physical_dev->android_dma_buf_import ||
++       handle_type != VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT ||
++       !(props->externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT))
++      return;
++
++   props->externalMemoryFeatures |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
++   props->exportFromImportedHandleTypes |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++   props->compatibleHandleTypes |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++}
++
+ static void
+ vkr_dispatch_vkGetPhysicalDeviceImageFormatProperties2(
+    UNUSED struct vn_dispatch_context *dispatch,
+@@ -715,6 +757,20 @@ vkr_dispatch_vkGetPhysicalDeviceImageFormatProperties2(
+    vn_replace_vkGetPhysicalDeviceImageFormatProperties2_args_handle(args);
+    args->ret = vk->GetPhysicalDeviceImageFormatProperties2(
+       args->physicalDevice, args->pImageFormatInfo, args->pImageFormatProperties);
++
++   const VkPhysicalDeviceExternalImageFormatInfo *external_info = vkr_find_struct(
++      args->pImageFormatInfo->pNext,
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO);
++   VkExternalImageFormatProperties *external_props = vkr_find_struct(
++      args->pImageFormatProperties->pNext, VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES);
++   if (physical_dev->android_dma_buf_import && external_info && external_props) {
++      if (args->ret == VK_SUCCESS)
++         vkr_android_dma_buf_export_fixup(physical_dev, external_info->handleType,
++                                          &external_props->externalMemoryProperties);
++      else
++         vkr_log("image format %d tiling %d: no external memory (%d)",
++                 args->pImageFormatInfo->format, args->pImageFormatInfo->tiling, args->ret);
++   }
+ }
+ 
+ static void
+@@ -743,6 +799,10 @@ vkr_dispatch_vkGetPhysicalDeviceExternalBufferProperties(
+    vn_replace_vkGetPhysicalDeviceExternalBufferProperties_args_handle(args);
+    vk->GetPhysicalDeviceExternalBufferProperties(
+       args->physicalDevice, args->pExternalBufferInfo, args->pExternalBufferProperties);
++
++   vkr_android_dma_buf_export_fixup(
++      physical_dev, args->pExternalBufferInfo->handleType,
++      &args->pExternalBufferProperties->externalMemoryProperties);
+ }
+ 
+ static void
 diff --git a/src/venus/vkr_physical_device.h b/src/venus/vkr_physical_device.h
 index b0b6691..28ba0b7 100644
 --- a/src/venus/vkr_physical_device.h
