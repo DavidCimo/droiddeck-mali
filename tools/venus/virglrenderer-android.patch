@@ -1,8 +1,160 @@
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+index ffe621b..bbf7787 100644
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -227,6 +227,121 @@ vkr_gbm_get_fd_info_from_allocation_info(UNUSED struct vkr_physical_device *phys
+ 
+ #endif /* ENABLE_GBM_ALLOCATION */
+ 
++#ifdef __ANDROID__
++#include <android/hardware_buffer.h>
++#include <fcntl.h>
++#include <linux/dma-heap.h>
++#include <sys/ioctl.h>
++#include <sys/socket.h>
++
++static int vkr_dma_heap_fd = -1;
++
++static void
++vkr_dma_heap_init_once(void)
++{
++   vkr_dma_heap_fd = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
++   if (vkr_dma_heap_fd < 0)
++      vkr_log("no dma-buf heap (%s): allocating AHardwareBuffers", strerror(errno));
++}
++
++/* An AHardwareBuffer's dma-buf: the first fd of its native handle, which the
++ * NDK hands out only through a unix socket.
++ */
++static int
++vkr_ahb_alloc_dma_buf(size_t size)
++{
++   const AHardwareBuffer_Desc desc = {
++      .width = (uint32_t)size,
++      .height = 1,
++      .layers = 1,
++      .format = AHARDWAREBUFFER_FORMAT_BLOB,
++      .usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN |
++               AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER,
++   };
++   AHardwareBuffer *ahb = NULL;
++   if (AHardwareBuffer_allocate(&desc, &ahb)) {
++      vkr_log("AHardwareBuffer_allocate of %zu failed", size);
++      return -1;
++   }
++
++   int fd = -1;
++   int sv[2];
++   if (!socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv)) {
++      if (!AHardwareBuffer_sendHandleToUnixSocket(ahb, sv[0])) {
++         char data[4096];
++         char control[CMSG_SPACE(sizeof(int) * 16)];
++         struct iovec iov = { .iov_base = data, .iov_len = sizeof(data) };
++         struct msghdr msg = {
++            .msg_iov = &iov,
++            .msg_iovlen = 1,
++            .msg_control = control,
++            .msg_controllen = sizeof(control),
++         };
++         if (recvmsg(sv[1], &msg, MSG_CMSG_CLOEXEC) > 0) {
++            struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++            if (cmsg && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
++               const int count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
++               const int *fds = (const int *)CMSG_DATA(cmsg);
++               for (int i = 0; i < count; i++) {
++                  if (i == 0)
++                     fd = fds[i];
++                  else
++                     close(fds[i]);
++               }
++            }
++         }
++      }
++      close(sv[0]);
++      close(sv[1]);
++   }
++   AHardwareBuffer_release(ahb);
++   if (fd < 0)
++      vkr_log("could not get the dma-buf of an AHardwareBuffer");
++   return fd;
++}
++
++static VkResult
++vkr_android_get_fd_info_from_allocation_info(const VkMemoryAllocateInfo *alloc_info,
++                                             int *out_dma_buf_fd,
++                                             VkImportMemoryFdInfoKHR *out_fd_info)
++{
++   static once_flag dma_heap_once_flag = ONCE_FLAG_INIT;
++   call_once(&dma_heap_once_flag, vkr_dma_heap_init_once);
++
++   const size_t size = align(alloc_info->allocationSize, getpagesize());
++   int dma_buf_fd = -1;
++   if (vkr_dma_heap_fd >= 0) {
++      struct dma_heap_allocation_data data = {
++         .len = size,
++         .fd_flags = O_RDWR | O_CLOEXEC,
++      };
++      if (!ioctl(vkr_dma_heap_fd, DMA_HEAP_IOCTL_ALLOC, &data))
++         dma_buf_fd = data.fd;
++      else
++         vkr_log("dma-buf heap allocation of %zu failed (%s)", size, strerror(errno));
++   }
++   if (dma_buf_fd < 0)
++      dma_buf_fd = vkr_ahb_alloc_dma_buf(size);
++   if (dma_buf_fd < 0)
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++
++   const int fd = os_dupfd_cloexec(dma_buf_fd);
++   if (fd < 0) {
++      close(dma_buf_fd);
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++   }
++
++   *out_dma_buf_fd = dma_buf_fd;
++   *out_fd_info = (VkImportMemoryFdInfoKHR){
++      .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
++      .pNext = alloc_info->pNext,
++      .fd = fd,
++      .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
++   };
++   return VK_SUCCESS;
++}
++#endif /* __ANDROID__ */
++
+ static void
+ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+                               struct vn_command_vkAllocateMemory *args)
+@@ -346,6 +461,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+              */
+             args->ret = vkr_udmabuf_get_fd_info_from_allocation_info(
+                physical_dev, alloc_info, &udmabuf_fd, &local_import_info);
++#ifdef __ANDROID__
++         } else if (physical_dev->android_dma_buf_import) {
++            /* Kept in udmabuf_fd: exported and closed the same way. */
++            args->ret = vkr_android_get_fd_info_from_allocation_info(
++               alloc_info, &udmabuf_fd, &local_import_info);
++#endif
+          } else {
+             args->ret = vkr_gbm_get_fd_info_from_allocation_info(
+                physical_dev, alloc_info, &gbm_bo, &local_import_info);
+@@ -367,6 +488,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+ 
+    struct vkr_device_memory *mem = vkr_device_memory_create_and_add(ctx, args);
+    if (!mem) {
++      vkr_log("vkAllocateMemory failed (%d): type %u flags 0x%x size %" PRIu64 "%s",
++              args->ret, mem_type_index, property_flags,
++              (uint64_t)alloc_info->allocationSize,
++              udmabuf_fd >= 0 ? ", imported dma-buf" : "");
++      if (udmabuf_fd >= 0)
++         close(udmabuf_fd);
+       if (local_import_info.fd >= 0)
+          close(local_import_info.fd);
+       if (gbm_bo)
 diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
-index e2c3baa..954207a 100644
+index e2c3baa..5b93333 100644
 --- a/src/venus/vkr_physical_device.c
 +++ b/src/venus/vkr_physical_device.c
-@@ -207,25 +207,38 @@ vkr_physical_device_init_memory_properties(struct vkr_physical_device *physical_
+@@ -207,31 +207,54 @@ vkr_physical_device_init_memory_properties(struct vkr_physical_device *physical_
        .sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES,
     };
  
@@ -46,4 +198,35 @@ index e2c3baa..954207a 100644
 +           physical_dev->is_opaque_fd_export_supported);
  
     /* fallback to gbm allocation with dma-buf import */
++   physical_dev->android_dma_buf_import = false;
++#ifdef __ANDROID__
++   if (!physical_dev->is_dma_buf_fd_export_supported &&
++       !physical_dev->is_opaque_fd_export_supported &&
++       physical_dev->EXT_external_memory_dma_buf) {
++      physical_dev->android_dma_buf_import = true;
++      vkr_log("memory export: none; allocating dma-bufs and importing them");
++   }
++#else
     if (!physical_dev->is_dma_buf_fd_export_supported &&
+        !physical_dev->is_opaque_fd_export_supported &&
+        physical_dev->EXT_external_memory_dma_buf)
+       physical_dev->gbm_device = vkr_physical_device_get_gbm_device();
++#endif
+ 
+    physical_dev->udmabuf_dev_fd = -1;
+    if (VKR_DEBUG(UDMABUF)) {
+diff --git a/src/venus/vkr_physical_device.h b/src/venus/vkr_physical_device.h
+index b0b6691..28ba0b7 100644
+--- a/src/venus/vkr_physical_device.h
++++ b/src/venus/vkr_physical_device.h
+@@ -33,6 +33,10 @@ struct vkr_physical_device {
+    bool is_opaque_fd_export_supported;
+    void *gbm_device;
+    int udmabuf_dev_fd;
++   /* Android: host-visible memory is a dma-buf the server allocates (dma-buf
++    * heap, else AHardwareBuffer) and imports, since the driver cannot export.
++    */
++   bool android_dma_buf_import;
+ 
+    VkQueueFamilyProperties *queue_family_properties;
+    uint32_t queue_family_property_count;
